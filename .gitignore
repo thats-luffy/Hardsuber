@@ -1,45 +1,5 @@
 ```
-# Logs and temp files
-*.log
-*.tmp
-*.swp
-
-# Environment
-.env
-.env.local
-.env.*
-
-# Editors
-.vscode/
-.idea/
-
-# Dependencies
-node_modules/
-.venv/
-venv/
-__pycache__/
-.mypy_cache/
-.pytest_cache/
-
-# Build artifacts
-dist/
-build/
-target/
-
-# Python
-*.pyc
-*.pyo
-*.pyd
-
-# System
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# Original rules preserved
-*.log
+# Documentation files
+QUICK_START_FA.md
+USER_GUIDE_FA.md
 ```
