@@ -10,15 +10,21 @@ on:
         description: 'Video URL'
         required: true
       srt_url:
-        description: 'Subtitle (SRT) URL'
+        description: 'Subtitle URL'
         required: true
       title:
         description: 'Video Title'
+        required: false
+        default: 'Untitled'
+      subtitle_config:
+        description: 'Subtitle Configuration (JSON)'
         required: true
-      settings:
-        description: 'Subtitle Settings (JSON)'
-        required: true
-        default: '{}'
+      api_callback_url:
+        description: 'API Callback URL for status updates'
+        required: false
+      api_key:
+        description: 'API Key for authentication'
+        required: false
 
 jobs:
   process-video:
@@ -27,10 +33,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        
+      
       - name: Check system resources
         run: |
-          echo "=== System Information ==="
+          echo "=== System Resources ==="
           echo "Disk Space:"
           df -h /
           echo ""
@@ -41,64 +47,173 @@ jobs:
           nproc
           echo ""
           echo "FFmpeg Version:"
-          ffmpeg -version | head -n 1
-          echo ""
-          echo "Python Version:"
-          python3 --version
-          
-      - name: Check available disk space
-        run: |
-          AVAILABLE_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
-          REQUIRED_GB=5
-          if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
-            echo "::error::Insufficient disk space. Available: ${AVAILABLE_GB}GB, Required: ${REQUIRED_GB}GB"
-            exit 1
-          fi
-          echo "✓ Sufficient disk space available: ${AVAILABLE_GB}GB"
-          
+          ffmpeg -version | head -3
+      
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          
-      - name: Install dependencies
+      
+      - name: Install FFmpeg and dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests aiohttp
-          
-      - name: Verify FFmpeg installation
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libass-dev fonts-liberation
+      
+      - name: Install Python dependencies
         run: |
-          which ffmpeg
-          ffmpeg -codecs | grep -E "(h264|aac)" || true
-          
-      - name: Create job configuration
+          pip install --no-cache-dir requests
+      
+      - name: Verify fonts directory
         run: |
-          cat > /tmp/job_config.json << EOF
-          {
-            "job_id": "${{ github.event.inputs.job_id }}",
-            "video_url": "${{ github.event.inputs.video_url }}",
-            "srt_url": "${{ github.event.inputs.srt_url }}",
-            "title": "${{ github.event.inputs.title }}",
-            "settings": ${{ github.event.inputs.settings }}
-          }
-          EOF
-          cat /tmp/job_config.json
-          
-      - name: Run video processor
-        id: processor
+          echo "Checking fonts..."
+          ls -la fonts/ || echo "Warning: fonts directory not found"
+          find fonts/ -name "*.ttf" -o -name "*.otf" 2>/dev/null || echo "No font files found"
+      
+      - name: Create working directory
         run: |
-          cd processor
-          python process.py /tmp/job_config.json
+          WORK_DIR=$(mktemp -d)
+          echo "WORK_DIR=$WORK_DIR" >> $GITHUB_ENV
+          echo "Created working directory: $WORK_DIR"
+      
+      - name: Download video with size limit
         env:
+          VIDEO_URL: ${{ inputs.video_url }}
+          MAX_SIZE: 1073741824  # 1GB
+        run: |
+          echo "Downloading video..."
+          VIDEO_FILE="$WORK_DIR/input.mp4"
+          
+          # Use curl with size limit check
+          curl -L --max-filesize $MAX_SIZE \
+            -H "User-Agent: HardsubBot/1.0" \
+            -o "$VIDEO_FILE" \
+            "$VIDEO_URL"
+          
+          if [ $? -ne 0 ]; then
+            echo "Error: Video download failed or exceeded size limit"
+            exit 1
+          fi
+          
+          VIDEO_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE")
+          echo "Video downloaded: $VIDEO_SIZE bytes"
+          echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+      
+      - name: Validate video with ffprobe
+        run: |
+          echo "Validating video..."
+          
+          # Get video info
+          ffprobe -v quiet -print_format json -show_format -show_streams "$VIDEO_FILE" > video_info.json
+          
+          # Extract duration
+          DURATION=$(jq -r '.format.duration // 0' video_info.json)
+          echo "Duration: $DURATION seconds"
+          
+          # Extract resolution
+          WIDTH=$(jq -r '.streams[] | select(.codec_type=="video") | .width // 0' video_info.json | head -1)
+          HEIGHT=$(jq -r '.streams[] | select(.codec_type=="video") | .height // 0' video_info.json | head -1)
+          echo "Resolution: ${WIDTH}x${HEIGHT}"
+          
+          # Check limits
+          MAX_DURATION=1800  # 30 minutes
+          MAX_RESOLUTION=3840  # 4K
+          
+          if (( $(echo "$DURATION > $MAX_DURATION" | bc -l) )); then
+            echo "Error: Video too long ($DURATION s > $MAX_DURATION s)"
+            exit 1
+          fi
+          
+          if [ "$WIDTH" -gt "$MAX_RESOLUTION" ] || [ "$HEIGHT" -gt "$MAX_RESOLUTION" ]; then
+            echo "Error: Video resolution too high (${WIDTH}x${HEIGHT} > ${MAX_RESOLUTION})"
+            exit 1
+          fi
+          
+          echo "VIDEO_DURATION=$DURATION" >> $GITHUB_ENV
+          echo "VIDEO_WIDTH=$WIDTH" >> $GITHUB_ENV
+          echo "VIDEO_HEIGHT=$HEIGHT" >> $GITHUB_ENV
+      
+      - name: Update status - Downloading SRT
+        if: always()
+        env:
+          API_CALLBACK_URL: ${{ inputs.api_callback_url }}
+          API_KEY: ${{ inputs.api_key }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          if [ -n "$API_CALLBACK_URL" ] && [ -n "$API_KEY" ]; then
+            curl -s -X POST "$API_CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: $API_KEY" \
+              -d '{"status": "DOWNLOADING", "current_stage": "Downloading subtitle"}'
+          fi
+      
+      - name: Download subtitle
+        env:
+          SRT_URL: ${{ inputs.srt_url }}
+        run: |
+          echo "Downloading subtitle..."
+          SRT_FILE="$WORK_DIR/subtitle.srt"
+          
+          curl -L -H "User-Agent: HardsubBot/1.0" -o "$SRT_FILE" "$SRT_URL"
+          
+          if [ ! -s "$SRT_FILE" ]; then
+            echo "Error: Failed to download subtitle or file is empty"
+            exit 1
+          fi
+          
+          echo "Subtitle downloaded"
+          echo "SRT_FILE=$SRT_FILE" >> $GITHUB_ENV
+      
+      - name: Validate subtitle
+        run: |
+          echo "Validating subtitle..."
+          
+          # Check if file has timing entries
+          if ! grep -q "\-\->" "$SRT_FILE"; then
+            echo "Error: Invalid SRT file - no timing entries found"
+            exit 1
+          fi
+          
+          echo "Subtitle validation passed"
+      
+      - name: Update status - Processing
+        if: always()
+        env:
+          API_CALLBACK_URL: ${{ inputs.api_callback_url }}
+          API_KEY: ${{ inputs.api_key }}
+        run: |
+          if [ -n "$API_CALLBACK_URL" ] && [ -n "$API_KEY" ]; then
+            curl -s -X POST "$API_CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: $API_KEY" \
+              -d '{"status": "PROCESSING", "current_stage": "Generating subtitle styles", "progress": 20}'
+          fi
+      
+      - name: Run video processing
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          VIDEO_URL: ${{ inputs.video_url }}
+          SRT_URL: ${{ inputs.srt_url }}
+          TITLE: ${{ inputs.title }}
+          SUBTITLE_CONFIG: ${{ inputs.subtitle_config }}
+          API_CALLBACK_URL: ${{ inputs.api_callback_url }}
+          API_KEY: ${{ inputs.api_key }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          MAX_VIDEO_SIZE_MB: 1024
-          MAX_DURATION_MINUTES: 30
-          MAX_SRT_SIZE_MB: 10
-          
+          WORK_DIR: ${{ env.WORK_DIR }}
+          VIDEO_FILE: ${{ env.VIDEO_FILE }}
+          SRT_FILE: ${{ env.SRT_FILE }}
+          VIDEO_DURATION: ${{ env.VIDEO_DURATION }}
+          VIDEO_WIDTH: ${{ env.VIDEO_WIDTH }}
+          VIDEO_HEIGHT: ${{ env.VIDEO_HEIGHT }}
+        run: |
+          echo "Starting video processing..."
+          cd processor
+          python3 process.py
+      
       - name: Cleanup
         if: always()
         run: |
           echo "Cleaning up temporary files..."
-          rm -rf /tmp/hardsub_* /tmp/job_config.json || true
-          echo "Cleanup completed."
+          rm -rf "$WORK_DIR" 2>/dev/null || true
+          rm -f video_info.json 2>/dev/null || true
+          echo "Cleanup complete"

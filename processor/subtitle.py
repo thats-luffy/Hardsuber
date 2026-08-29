@@ -1,6 +1,7 @@
+#!/usr/bin/env python3
 """
-Subtitle processing utilities.
-Converts SRT to ASS with custom styling for FFmpeg.
+Subtitle processing utilities for Hardsub Platform
+Converts SRT to ASS with full styling support for Persian/RTL
 """
 
 import re
@@ -8,203 +9,270 @@ from pathlib import Path
 from datetime import timedelta
 
 
-def parse_srt_time(time_str: str) -> timedelta:
-    """Parse SRT timestamp format (HH:MM:SS,mmm) to timedelta."""
-    time_str = time_str.strip()
-    # Replace comma with dot for milliseconds
-    time_str = time_str.replace(',', '.')
+def parse_srt(srt_path):
+    """
+    Parse SRT file and return list of subtitle entries.
+    Each entry: {index, start, end, text}
+    """
+    content = srt_path.read_text(encoding='utf-8')
     
-    try:
-        parts = time_str.split(':')
-        hours = int(parts[0])
-        minutes = int(parts[1])
-        seconds_parts = parts[2].split('.')
-        seconds = int(seconds_parts[0])
-        milliseconds = int(seconds_parts[1]) if len(seconds_parts) > 1 else 0
+    # Normalize line endings
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    
+    entries = []
+    blocks = re.split(r'\n\n+', content.strip())
+    
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) < 3:
+            continue
         
-        return timedelta(hours=hours, minutes=minutes, seconds=seconds, milliseconds=milliseconds)
-    except Exception as e:
-        print(f"Error parsing SRT time '{time_str}': {e}")
-        return timedelta(0)
+        try:
+            index = int(lines[0].strip())
+        except ValueError:
+            continue
+        
+        # Parse timing line
+        timing_line = lines[1].strip()
+        timing_match = re.match(
+            r'(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})',
+            timing_line
+        )
+        
+        if not timing_match:
+            continue
+        
+        # Convert to milliseconds
+        h1, m1, s1, ms1 = map(int, timing_match.groups()[:4])
+        h2, m2, s2, ms2 = map(int, timing_match.groups()[4:])
+        
+        start_ms = h1 * 3600000 + m1 * 60000 + s1 * 1000 + ms1
+        end_ms = h2 * 3600000 + m2 * 60000 + s2 * 1000 + ms2
+        
+        # Join remaining lines as text
+        text = '\n'.join(lines[2:])
+        
+        entries.append({
+            'index': index,
+            'start_ms': start_ms,
+            'end_ms': end_ms,
+            'text': text
+        })
+    
+    return entries
 
 
-def format_ass_time(td: timedelta) -> str:
-    """Format timedelta to ASS timestamp format (H:MM:SS.cc)."""
-    total_seconds = int(td.total_seconds())
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    centiseconds = int(td.microseconds / 10000)
+def format_ass_time(ms):
+    """
+    Format milliseconds as ASS time: H:MM:SS.cc
+    """
+    hours = ms // 3600000
+    minutes = (ms % 3600000) // 60000
+    seconds = (ms % 60000) // 1000
+    centiseconds = (ms % 1000) // 10
     
     return f"{hours}:{minutes:02d}:{seconds:02d}.{centiseconds:02d}"
 
 
-def convert_srt_to_ass(srt_path: Path, ass_path: Path, style: dict = None) -> bool:
-    """Convert SRT file to ASS format with custom styling."""
-    try:
-        content = srt_path.read_text(encoding='utf-8')
-        
-        # Parse SRT entries
-        entries = []
-        blocks = re.split(r'\n\s*\n', content.strip())
-        
-        for block in blocks:
-            lines = block.strip().split('\n')
-            if len(lines) < 3:
-                continue
-                
-            # Skip index line
-            idx = 0
-            if lines[0].isdigit():
-                idx = 1
-                
-            if idx + 2 >= len(lines):
-                continue
-                
-            # Parse timing line
-            timing_line = lines[idx]
-            timing_match = re.match(r'(\d+:\d+:\d+[,\.]\d+)\s*-->\s*(\d+:\d+:\d+[,\.]\d+)', timing_line)
-            if not timing_match:
-                continue
-                
-            start_time = parse_srt_time(timing_match.group(1))
-            end_time = parse_srt_time(timing_match.group(2))
-            
-            # Get text (may span multiple lines)
-            text_lines = lines[idx + 1:]
-            text = '\n'.join(text_lines)
-            
-            # Convert SRT tags to ASS tags
-            text = text.replace('<i>', '{\\i1}').replace('</i>', '{\\i0}')
-            text = text.replace('<b>', '{\\b1}').replace('</b>', '{\\b0}')
-            text = text.replace('<u>', '{\\u1}').replace('</u>', '{\\u0}')
-            
-            entries.append({
-                'start': start_time,
-                'end': end_time,
-                'text': text
-            })
-        
-        if not entries:
-            print("Warning: No subtitle entries found")
-            return False
-            
-        # Generate ASS file
-        ass_content = generate_ass_file(entries, style)
-        ass_path.write_text(ass_content, encoding='utf-8')
-        
-        print(f"Converted {len(entries)} subtitle entries to ASS format")
-        return True
-        
-    except Exception as e:
-        print(f"Error converting SRT to ASS: {e}")
-        return False
-
-
-def generate_ass_style(settings: dict) -> dict:
-    """Generate ASS style from settings."""
-    
-    def hex_to_ass(hex_color: str) -> str:
-        """Convert hex color to ASS format (&HAABBGGRR)."""
-        hex_color = hex_color.lstrip('#')
+def hex_to_ass_color(hex_color):
+    """
+    Convert hex color (#RRGGBB) to ASS color (&HBBGGRR&).
+    ASS uses BGR order and requires &H prefix/suffix.
+    """
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
         r = int(hex_color[0:2], 16)
         g = int(hex_color[2:4], 16)
         b = int(hex_color[4:6], 16)
-        return f"&H{b:02X}{g:02X}{r:02X}"
-    
-    font_name = settings.get('fontFamily', 'Vazirmatn')
-    font_size = settings.get('fontSize', 42)
-    font_color = hex_to_ass(settings.get('fontColor', '#FFFFFF'))
-    
-    bold = 1 if settings.get('bold', False) else 0
-    italic = 1 if settings.get('italic', False) else 0
-    
-    outline_width = settings.get('outlineWidth', 2) if settings.get('outlineEnabled', True) else 0
-    shadow_depth = settings.get('shadowDepth', 2) if settings.get('shadowEnabled', True) else 0
-    
-    outline_color = hex_to_ass(settings.get('outlineColor', '#000000'))
-    shadow_color = hex_to_ass(settings.get('shadowColor', '#000000'))
-    
-    # Background
-    bg_enabled = settings.get('backgroundEnabled', True)
-    bg_color = settings.get('backgroundColor', '#000000')
-    bg_opacity = settings.get('backgroundOpacity', 60)
-    # ASS alpha: 0 = opaque, 255 = transparent
-    bg_alpha = int((100 - bg_opacity) / 100 * 255)
-    bg_hex = hex_to_ass(bg_color)
-    # Modify alpha channel in ASS color
-    bg_ass = f"&H{bg_alpha:02X}{bg_hex[3:]}"
-    
-    # Margins
-    h_padding = settings.get('horizontalPadding', 20)
-    v_padding = settings.get('verticalPadding', 10)
-    
-    # Alignment
-    position = settings.get('position', 'bottom')
-    alignment = settings.get('alignment', 'center')
-    
-    alignment_map = {
-        ('top', 'left'): 7,
-        ('top', 'center'): 8,
-        ('top', 'right'): 9,
-        ('center', 'left'): 4,
-        ('center', 'center'): 5,
-        ('center', 'right'): 6,
-        ('bottom', 'left'): 1,
-        ('bottom', 'center'): 2,
-        ('bottom', 'right'): 3
-    }
-    ass_alignment = alignment_map.get((position, alignment), 2)
-    
-    return {
-        'name': 'Default',
-        'fontname': font_name,
-        'fontsize': font_size,
-        'primarycolor': font_color,
-        'secondarycolor': font_color,
-        'outlinecolor': outline_color,
-        'backcolor': bg_ass if bg_enabled else '&H00000000',
-        'bold': bold,
-        'italic': italic,
-        'borderstyle': 1,  # Outline and drop shadow
-        'outline': outline_width,
-        'shadow': shadow_depth,
-        'alignment': ass_alignment,
-        'marginl': h_padding,
-        'marginr': h_padding,
-        'marginv': v_padding,
-        'encoding': 1  # Default charset
-    }
+        return f"&H{b:02X}{g:02X}{r:02X}&"
+    return "&HFFFFFF&"  # Default white
 
 
-def generate_ass_file(entries: list, style: dict = None) -> str:
-    """Generate complete ASS file content."""
-    
-    if style is None:
-        style = generate_ass_style({})
-    
-    # ASS header
-    header = f"""[Script Info]
-Title: Hardsub Subtitle
-ScriptType: v4.00+
-PlayResX: 1920
-PlayResY: 1080
-Timer: 100.0000
+def hex_to_ass_color_with_alpha(hex_color, opacity_percent):
+    """
+    Convert hex color with opacity to ASS color with alpha.
+    Alpha in ASS is inverted: 00 = opaque, FF = transparent
+    """
+    hex_color = hex_color.lstrip('#')
+    if len(hex_color) == 6:
+        r = int(hex_color[0:2], 16)
+        g = int(hex_color[2:4], 16)
+        b = int(hex_color[4:6], 16)
+        
+        # Calculate alpha (inverted: 0% opacity = FF alpha, 100% opacity = 00 alpha)
+        alpha = int(255 * (100 - opacity_percent) / 100)
+        
+        return f"&H{alpha:02X}{b:02X}{g:02X}{r:02X}&"
+    return "&H00FFFFFF&"  # Default opaque white
 
-[V4+ Styles]
-Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: {style['name']},{style['fontname']},{style['fontsize']},{style['primarycolor']},{style['secondarycolor']},{style['outlinecolor']},{style['backcolor']},{style['bold']},{style['italic']},0,0,100,100,0,0,{style['borderstyle']},{style['outline']},{style['shadow']},{style['alignment']},{style['marginl']},{style['marginr']},{style['marginv']},{style['encoding']}
 
-[Events]
-Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+def generate_ass_style(config, fonts_dir):
+    """
+    Generate ASS style line from configuration.
+    Returns the [V4+ Styles] section content.
+    """
+    # Extract config values with defaults
+    font_family = config.get('fontFamily', 'Vazirmatn')
+    font_size = config.get('fontSize', 42)
+    bold = config.get('bold', False)
+    italic = config.get('italic', False)
+    font_color = config.get('fontColor', '#FFFFFF')
     
-    # Dialogue entries
-    dialogue_lines = []
+    outline_enabled = config.get('outlineEnabled', True)
+    outline_color = config.get('outlineColor', '#000000')
+    outline_width = config.get('outlineWidth', 2)
+    
+    shadow_enabled = config.get('shadowEnabled', True)
+    shadow_color = config.get('shadowColor', '#000000')
+    shadow_depth = config.get('shadowDepth', 2)
+    
+    background_enabled = config.get('backgroundEnabled', True)
+    background_color = config.get('backgroundColor', '#000000')
+    background_opacity = config.get('backgroundOpacity', 60)
+    
+    position = config.get('position', 'bottom')
+    vertical_margin = config.get('verticalMargin', 30)
+    alignment = config.get('alignment', 'center')
+    
+    horizontal_padding = config.get('horizontalPadding', 20)
+    vertical_padding = config.get('verticalPadding', 10)
+    
+    # Map font weight
+    weight = 700 if bold else 400
+    
+    # Map alignment for ASS
+    # ASS alignments: 1=Bottom Left, 2=Bottom Center, 3=Bottom Right
+    #                 4=Middle Left, 5=Middle Center, 6=Middle Right
+    #                 7=Top Left, 8=Top Center, 9=Top Right
+    if position == 'top':
+        base_align = 7  # Top
+    elif position == 'center':
+        base_align = 4  # Middle
+    else:  # bottom
+        base_align = 1  # Bottom
+    
+    if alignment == 'left':
+        ass_alignment = base_align
+    elif alignment == 'right':
+        ass_alignment = base_align + 2
+    else:  # center
+        ass_alignment = base_align + 1
+    
+    # For background box, we use BorderStyle=3 (opaque box)
+    # This creates a solid background behind the text
+    border_style = 3 if background_enabled else 1
+    
+    # Convert colors
+    primary_color = hex_to_ass_color(font_color)
+    outline_color_ass = hex_to_ass_color(outline_color)
+    shadow_color_ass = hex_to_ass_color(shadow_color)
+    
+    # Background color with opacity (only used if BorderStyle=3)
+    bg_color_ass = hex_to_ass_color_with_alpha(background_color, background_opacity)
+    
+    # Build style line
+    # Format: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,
+    #         Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,
+    #         Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding
+    
+    # The back colour is used for the background box when BorderStyle=3
+    style_line = (
+        f"Default,"                          # Name
+        f"{font_family},"                    # Fontname
+        f"{font_size},"                      # Fontsize
+        f"{primary_color},"                  # PrimaryColour
+        f"{primary_color},"                  # SecondaryColour (same as primary)
+        f"{outline_color_ass},"              # OutlineColour
+        f"{bg_color_ass},"                   # BackColour (background with alpha)
+        f"{weight},"                         # Bold (400 or 700)
+        f"{1 if italic else 0},"             # Italic
+        "0,"                                 # Underline
+        "0,"                                 # StrikeOut
+        "100,"                               # ScaleX
+        "100,"                               # ScaleY
+        "0,"                                 # Spacing
+        "0,"                                 # Angle
+        f"{border_style},"                   # BorderStyle (1=outline, 3=opaque box)
+        f"{outline_width if outline_enabled else 0},"  # Outline
+        f"{shadow_depth if shadow_enabled else 0},"    # Shadow
+        f"{ass_alignment},"                  # Alignment
+        f"{horizontal_padding},"             # MarginL (also affects background padding)
+        f"{horizontal_padding},"             # MarginR
+        f"{vertical_margin},"                # MarginV (vertical position)
+        "1"                                  # Encoding (1=Default, supports Unicode)
+    )
+    
+    return style_line
+
+
+def convert_srt_to_ass(srt_path, config, fonts_dir):
+    """
+    Convert SRT file to ASS format with custom styling.
+    Returns the complete ASS file content as string.
+    """
+    entries = parse_srt(srt_path)
+    
+    if not entries:
+        # Return minimal valid ASS even if no entries
+        return create_empty_ass(config, fonts_dir)
+    
+    style_line = generate_ass_style(config, fonts_dir)
+    
+    # Build ASS content
+    ass_lines = [
+        "[Script Info]",
+        "; Script generated by Hardsub Platform",
+        "ScriptType: v4.00+",
+        "PlayResX: 1920",
+        "PlayResY: 1080",
+        "Timer: 100.0000",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: {style_line}",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    
+    # Add each subtitle entry
     for entry in entries:
-        start = format_ass_time(entry['start'])
-        end = format_ass_time(entry['end'])
-        text = entry['text'].replace('\n', '\\N')
-        dialogue_lines.append(f"Dialogue: 0,{start},{end},{style['name']},,0,0,0,,{text}")
+        # Escape special ASS characters in text
+        # { } are used for tags, \N for line breaks
+        text = entry['text']
+        text = text.replace('\\', '\\\\')
+        text = text.replace('{', '\\{')
+        text = text.replace('}', '\\}')
+        
+        # Convert newlines to ASS line breaks
+        text = text.replace('\n', '\\N')
+        
+        start_time = format_ass_time(entry['start_ms'])
+        end_time = format_ass_time(entry['end_ms'])
+        
+        ass_lines.append(
+            f"Dialogue: 0,{start_time},{end_time},Default,,0,0,0,,{text}"
+        )
     
-    return header + '\n'.join(dialogue_lines)
+    return '\n'.join(ass_lines)
+
+
+def create_empty_ass(config, fonts_dir):
+    """Create a minimal valid ASS file with just the header and styles."""
+    style_line = generate_ass_style(config, fonts_dir)
+    
+    return '\n'.join([
+        "[Script Info]",
+        "; Script generated by Hardsub Platform",
+        "ScriptType: v4.00+",
+        "PlayResX: 1920",
+        "PlayResY: 1080",
+        "Timer: 100.0000",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: {style_line}",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ])

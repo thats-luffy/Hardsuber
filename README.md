@@ -1,253 +1,495 @@
-# GitHub Hardsub Video Processing Platform
+# Hardsub Online - Persian Video Hard-Subtitle Platform
 
-A complete, production-ready Persian RTL online video hard-subtitle (hardsub) platform using GitHub Pages + GitHub Actions + FFmpeg + Python + Telegram Bot API.
+A complete, production-ready online video hard-subtitle platform using GitHub Pages + GitHub Actions + FFmpeg + Python + Telegram Bot API.
 
-## 🎬 Features
-
-- **Visual Subtitle Designer** - Real-time preview of subtitle styling
-- **Persian/RTL Support** - Full support for Persian, Arabic, and mixed languages
-- **Background Processing** - Jobs run on GitHub Actions without keeping browser open
-- **Telegram Upload** - Automatic upload to Telegram after processing
-- **Video Validation** - Checks size, duration, and resolution limits
-- **Custom Presets** - Save and load subtitle styling presets
-
-## 📋 Architecture
+## 🎯 Project Architecture
 
 ```
-GitHub Pages (Frontend)
-       │
-       ▼
-Create Processing Job
-       │
-       ▼
-GitHub Actions Workflow
-       │
-       ▼
-Temporary Runner
-       │
-       ├── Download Video
-       ├── Download SRT
-       ├── Prepare Fonts
-       ├── FFmpeg Hardsub
-       ├── Upload to Telegram
-       └── Cleanup
+┌──────────────────────┐
+│   GitHub Pages       │  ← Static Frontend (HTML/CSS/JS)
+│   (User Interface)   │
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   Backend API        │  ← Secure job submission & status tracking
+│   (Python Server)    │     • Never exposes secrets to frontend
+│                      │     • Stores job state persistently
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   GitHub Actions     │  ← Temporary runner for video processing
+│   (Workflow)         │     • Downloads video & subtitle
+│                      │     • Validates limits (1GB, 30min, 4K)
+│                      │     • Runs FFmpeg hardsub
+│                      │     • Uploads to Telegram
+│                      │     • Cleans up temp files
+└──────────┬───────────┘
+           │
+           ▼
+┌──────────────────────┐
+│   Telegram Bot       │  ← Final video delivery
+│   (Bot API)          │
+└──────────────────────┘
 ```
 
-## 🚀 Setup Instructions
+## 🔐 Security Architecture
 
-### 1. GitHub Pages Setup
+### Why a Backend API is Required
 
-1. Go to your repository Settings → Pages
-2. Select "Deploy from a branch"
-3. Choose `main` branch and `/ (root)` folder
-4. Click Save
+**GitHub Pages alone CANNOT securely trigger GitHub Actions** because:
 
-### 2. Required GitHub Secrets
+1. **No secrets in frontend**: A GitHub Personal Access Token (PAT) would be required to call the GitHub Actions API, but putting this in JavaScript would expose it to all users.
 
-Go to Settings → Secrets and variables → Actions and add:
+2. **Job status persistence**: GitHub Actions doesn't provide a built-in way for the frontend to query job status without credentials.
 
-| Secret Name | Description |
-|-------------|-------------|
-| `TELEGRAM_BOT_TOKEN` | Your Telegram bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | Target chat/channel ID for uploads |
+3. **API key protection**: The backend uses an API key to authenticate status updates from GitHub Actions, preventing unauthorized modifications.
 
-### 3. Telegram Bot Setup
+### Solution: Lightweight Backend API
 
-1. Open Telegram and search for `@BotFather`
-2. Send `/newbot` command
-3. Follow instructions to create your bot
-4. Copy the bot token (looks like: `1234567890:ABCdefGHIjklMNOpqrsTUVwxyz`)
-5. Add the bot to your target channel/group as admin
+The `backend/api_server.py` provides:
 
-### 4. Get Chat ID
-
-For channels:
-1. Add your bot as admin to the channel
-2. Send a message in the channel
-3. Visit: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
-4. Find `chat.id` in the response (for channels it starts with `-100`)
-
-## ⚙️ Configuration
-
-### Video Limits (configurable in workflow file)
-
-- Maximum video size: 1 GB
-- Maximum duration: 30 minutes
-- Maximum resolution: 4K (3840×2160)
-- Maximum SRT size: 10 MB
-
-### Subtitle Settings
-
-The following settings can be customized:
-
-| Setting | Description | Range |
-|---------|-------------|-------|
-| Font Family | Vazirmatn, Vazir, Tahoma, Arial | - |
-| Font Size | Text size in pixels | 10-150 |
-| Bold | Enable bold text | On/Off |
-| Italic | Enable italic text | On/Off |
-| Font Color | Text color | Any hex color |
-| Outline | Text outline/border | On/Off |
-| Outline Width | Border thickness | 0-10 |
-| Shadow | Drop shadow effect | On/Off |
-| Shadow Depth | Shadow distance | 0-10 |
-| Background | Subtitle background box | On/Off |
-| Background Opacity | Transparency level | 0-100% |
-| Position | Vertical position | Top/Center/Bottom |
-| Alignment | Text alignment | Left/Center/Right |
-
-## 🔧 Local Development
-
-### Prerequisites
-
-- Python 3.10+
-- FFmpeg
-- Node.js (optional, for local server)
-
-### Install Dependencies
-
-```bash
-pip install requests aiohttp
-```
-
-### Run Locally
-
-```bash
-# Start a local server
-python -m http.server 8000
-
-# Or use any static file server
-npx serve .
-```
-
-Visit `http://localhost:8000` in your browser.
-
-### Test Processor Locally
-
-```bash
-cd processor
-python process.py /path/to/job_config.json
-```
-
-Example job config:
-
-```json
-{
-  "job_id": "TEST-001",
-  "video_url": "https://example.com/video.mp4",
-  "srt_url": "https://example.com/subtitle.srt",
-  "title": "Test Video",
-  "settings": {
-    "fontFamily": "Vazirmatn",
-    "fontSize": 42,
-    "bold": true,
-    "fontColor": "#FFFFFF"
-  }
-}
-```
+- **Secure job submission**: Accepts job requests from frontend, triggers GitHub Actions server-side
+- **Status tracking**: Stores job state in JSON files, accessible via public API
+- **API key authentication**: GitHub Actions uses a secret key to update job status
+- **No secrets exposed**: Telegram tokens and GitHub PAT never reach the browser
 
 ## 📁 Project Structure
 
 ```
-/
-├── index.html              # Main HTML page
-├── style.css               # Stylesheet
-├── app.js                  # Frontend JavaScript
-├── config.js               # Configuration constants
+/workspace/
+├── static/
+│   ├── index.html          # Main HTML page (RTL/Persian UI)
+│   ├── style.css           # Dark modern stylesheet
+│   ├── config.js           # Configuration & presets
+│   └── app.js              # Frontend JavaScript
 │
-├── fonts/
-│   ├── Vazirmatn-Regular.ttf
-│   └── Vazirmatn-Bold.ttf
+├── backend/
+│   └── api_server.py       # Secure backend API server
 │
 ├── processor/
-│   ├── process.py          # Main processor script
-│   ├── ffmpeg_utils.py     # FFmpeg utilities
-│   ├── subtitle.py         # SRT to ASS conversion
-│   ├── telegram.py         # Telegram upload
+│   ├── process.py          # Main processing pipeline
+│   ├── ffmpeg_utils.py     # FFmpeg command builder
+│   ├── subtitle.py         # SRT to ASS converter
+│   ├── telegram.py         # Telegram upload handler
 │   └── validation.py       # Input validation
 │
+├── fonts/
+│   ├── Vazirmatn-Regular.ttf   # Persian font (regular)
+│   └── Vazirmatn-Bold.ttf      # Persian font (bold)
+│
 ├── presets/
-│   └── presets.json        # Built-in presets
+│   └── presets.json        # Built-in subtitle presets
 │
-├── .github/
-│   └── workflows/
-│       └── video-processing.yml
+├── .github/workflows/
+│   └── video-processing.yml    # GitHub Actions workflow
 │
-└── README.md
+└── README.md               # This documentation
 ```
 
-## 🔒 Security
+## 🚀 Deployment Guide
 
-- No secrets exposed in frontend code
-- All sensitive data stored in GitHub Secrets
-- URL validation on both client and server side
-- File size and duration limits enforced
-- Temporary files cleaned up after processing
-- No command injection vulnerabilities (uses subprocess with argument arrays)
+### Step 1: Fork/Clone Repository
 
-## ⚠️ Troubleshooting
+```bash
+git clone https://github.com/YOUR_USERNAME/hardsub-platform.git
+cd hardsub-platform
+```
 
-### Workflow fails with "Insufficient disk space"
+### Step 2: Configure GitHub Pages
 
-The runner needs at least 5GB free space. Try:
-- Using a smaller video file
-- Running during off-peak hours
+1. Go to repository **Settings** → **Pages**
+2. Under "Source", select **Deploy from a branch**
+3. Choose branch: **main**, folder: **/static**
+4. Click **Save**
+5. Your site will be available at: `https://YOUR_USERNAME.github.io/YOUR_REPO/`
 
-### Telegram upload fails
+### Step 3: Create Telegram Bot
 
-Check:
-1. Bot token is correct
-2. Bot is admin in the target channel
-3. Chat ID is correct (includes `-` for channels)
+1. Open Telegram and search for **@BotFather**
+2. Send `/newbot` command
+3. Follow prompts to create your bot
+4. **Save the bot token** (looks like: `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+
+### Step 4: Get Chat ID
+
+1. Add your bot to a channel/group (make it admin if needed)
+2. Send a message in the channel
+3. Visit: `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
+4. Find the `"chat": {"id": -100XXXXXXXXXX}` in the response
+5. **Copy the chat ID** (include the negative sign for channels/groups)
+
+### Step 5: Configure GitHub Secrets
+
+Go to repository **Settings** → **Secrets** → **Actions** → **New repository secret**:
+
+| Secret Name | Value | Description |
+|-------------|-------|-------------|
+| `TELEGRAM_BOT_TOKEN` | `123456789:ABCdef...` | Your Telegram bot token |
+| `TELEGRAM_CHAT_ID` | `-1001234567890` | Target channel/group ID |
+
+**Optional** (for production with backend):
+
+| Secret Name | Value | Description |
+|-------------|-------|-------------|
+| `GITHUB_PAT` | `ghp_...` | Personal Access Token with `workflow` scope |
+
+### Step 6: Deploy Backend API (Production)
+
+For production use, you need to host the backend API somewhere. Options:
+
+#### Option A: Simple VPS/Cloud Server
+
+```bash
+# On your server
+export GITHUB_OWNER="your-username"
+export GITHUB_REPO="hardsub-platform"
+export GITHUB_PAT="ghp_your_pat_token"
+export BACKEND_PORT=8080
+
+# Run the API server
+cd /path/to/hardsub-platform/backend
+python3 api_server.py
+```
+
+#### Option B: Docker Deployment
+
+Create a `Dockerfile`:
+
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+COPY backend/ /app/
+EXPOSE 8080
+CMD ["python3", "api_server.py"]
+```
+
+Then deploy to any container platform (Railway, Render, Fly.io, etc.).
+
+#### Option C: Serverless (Advanced)
+
+Adapt the backend for AWS Lambda, Cloudflare Workers, or similar.
+
+### Step 7: Update Frontend API URL
+
+In `static/config.js`, update the `baseUrl`:
+
+```javascript
+const API_CONFIG = {
+    baseUrl: 'https://your-backend-domain.com',  // Change for production
+    pollInterval: 3000,
+    maxRetries: 3
+};
+```
+
+For local testing, keep it as `window.location.origin`.
+
+## 🎨 Features
+
+### Subtitle Designer
+
+- **Font Family**: Vazirmatn (regular/bold), Vazir
+- **Font Size**: 10-150px slider
+- **Font Weight**: Normal/Bold toggle
+- **Italic**: Toggle
+- **Font Color**: Full color picker
+- **Outline**: Enable/disable, color, width (0-10)
+- **Shadow**: Enable/disable, color, depth (0-10)
+- **Background**: Enable/disable, color, opacity (0-100%)
+- **Padding**: Horizontal (0-50), Vertical (0-30)
+- **Position**: Top/Center/Bottom
+- **Alignment**: Right/Center/Left
+- **Vertical Margin**: 0-200px
+
+### Built-in Presets
+
+1. **کلاسیک (Classic)**: Clean white text with outline
+2. **سفید ضخیم (Bold White)**: Larger bold text
+3. **سینمایی (Cinematic)**: Semi-transparent background
+4. **مینیمال (Minimal)**: No effects, clean look
+5. **پیش‌فرض فارسی (Persian Default)**: Optimized for Persian
+6. **نتفلیکس (Netflix-style)**: Black background, high opacity
+
+### Live Preview
+
+- **16:9 aspect ratio** video frame simulation
+- **Real-time updates** for all settings
+- **Multi-line support** with automatic background expansion
+- **Custom test text** input
+
+## ⚙️ Processing Pipeline
+
+### GitHub Actions Workflow
+
+1. **Checkout** repository
+2. **Check system resources** (disk, memory, CPU)
+3. **Install dependencies** (FFmpeg, libass, Python)
+4. **Verify fonts** directory
+5. **Create temporary working directory**
+6. **Download video** with 1GB size limit enforcement
+7. **Validate video** with ffprobe:
+   - Duration ≤ 30 minutes
+   - Resolution ≤ 4K (3840×2160)
+8. **Download subtitle** (SRT format)
+9. **Validate subtitle** file
+10. **Convert SRT to ASS** with custom styling
+11. **Run FFmpeg** hardsub with libass filter
+12. **Upload to Telegram** with formatted caption
+13. **Cleanup** all temporary files
+
+### Video Limits
+
+| Limit | Value | Enforcement |
+|-------|-------|-------------|
+| **Max File Size** | 1 GB | Checked during download (Content-Length + streaming) |
+| **Max Duration** | 30 minutes | Validated with ffprobe before processing |
+| **Max Resolution** | 4K (3840×2160) | Validated with ffprobe before processing |
+| **Max Subtitle Size** | 10 MB | Checked during download |
+
+If any limit is exceeded:
+- Job is rejected immediately
+- Clear Persian error message displayed
+- No GitHub Actions resources wasted
+
+### FFmpeg Configuration
+
+```bash
+ffmpeg -y -i input.mp4 \
+  -vf "libass=filename='subtitle.ass':fontsdir='./fonts'" \
+  -c:v libx264 -preset medium -crf 23 \
+  -c:a aac -b:a 192k \
+  -movflags +faststart \
+  output.mp4
+```
+
+- **Video Codec**: H.264 (libx264)
+- **Quality**: CRF 23 (balanced quality/size)
+- **Audio**: AAC 192kbps
+- **Subtitle Rendering**: libass filter with custom fonts
+
+## 📊 Job Status System
+
+### Status Values
+
+| Status | Persian | Description |
+|--------|---------|-------------|
+| `QUEUED` | در صف انتظار | Job created, waiting for runner |
+| `DOWNLOADING` | در حال دانلود | Downloading video/subtitle |
+| `PROCESSING` | در حال پردازش | Running FFmpeg |
+| `UPLOADING` | در حال آپلود به تلگرام | Uploading final video |
+| `COMPLETED` | تکمیل شد | Successfully finished |
+| `FAILED` | خطا | Error occurred |
+
+### Progress Tracking
+
+Progress is calculated from **real FFmpeg output**:
+
+```
+time=00:05:23.45 → 5:23 / 30:00 → 18% progress
+```
+
+Not fake timers or random percentages.
+
+### Job Persistence
+
+- **Active jobs**: Stored in `localStorage` (survives page refresh)
+- **Job history**: Last 50 jobs kept in `localStorage`
+- **Server-side status**: JSON files in backend (for cross-device access)
+
+## 🔧 Local Development
+
+### Run Backend API
+
+```bash
+cd backend
+export BACKEND_PORT=8080
+python3 api_server.py
+```
+
+Access at: `http://localhost:8080`
+
+### Test Without GitHub Actions
+
+The backend has a **development mode** that doesn't require GitHub credentials:
+
+```bash
+# No GITHUB_OWNER/REPO/PAT set
+python3 backend/api_server.py
+```
+
+Jobs will be created but won't actually process (useful for UI testing).
+
+### Manual Video Processing Test
+
+```bash
+cd processor
+export JOB_ID="TEST-001"
+export VIDEO_URL="https://example.com/video.mp4"
+export SRT_URL="https://example.com/sub.srt"
+export TITLE="Test Video"
+export SUBTITLE_CONFIG='{"fontFamily":"Vazirmatn","fontSize":42}'
+export TELEGRAM_BOT_TOKEN=""
+export TELEGRAM_CHAT_ID=""
+
+python3 process.py
+```
+
+## 🛡️ Security Considerations
+
+### What's Protected
+
+✅ **Telegram Bot Token** - Only in GitHub Secrets, never in frontend  
+✅ **Telegram Chat ID** - Only in GitHub Secrets  
+✅ **GitHub PAT** - Only in backend environment variables  
+✅ **API Key** - Generated at runtime, used for callback authentication  
+
+### Input Validation
+
+- **URL validation**: Must be HTTP/HTTPS
+- **File extension checks**: Video (.mp4, .mkv, etc.), Subtitle (.srt, .ass)
+- **Size limits**: Enforced during download (streaming with byte counting)
+- **Duration/resolution**: Validated with ffprobe before expensive processing
+- **Command injection prevention**: All subprocess calls use argument arrays
+
+### SSRF Protection
+
+The backend should implement additional protections for production:
+
+- Whitelist allowed domains for video/subtitle URLs
+- Block private IP ranges (10.x.x.x, 192.168.x.x, etc.)
+- Rate limiting per IP/user
+
+## 🐛 Troubleshooting
+
+### "Workflow trigger failed"
+
+**Cause**: Missing or invalid GitHub PAT in backend.
+
+**Solution**: 
+1. Create a PAT with `workflow` scope
+2. Set `GITHUB_PAT` environment variable in backend
+3. Ensure `GITHUB_OWNER` and `GITHUB_REPO` are correct
+
+### "Telegram upload failed"
+
+**Causes**:
+- File too large (>50MB for regular bots)
+- Invalid bot token
+- Bot not added to target channel
+
+**Solutions**:
+1. Check file size (Telegram limit: 50MB)
+2. Verify `TELEGRAM_BOT_TOKEN` secret
+3. Add bot to channel as admin
+
+### "Insufficient disk space"
+
+GitHub-hosted runners typically have ~14GB free space. If exceeded:
+
+1. Check video size (must be <1GB)
+2. Output file will be similar size
+3. Ensure 5GB+ free space before starting
 
 ### Font not rendering correctly
 
-Ensure:
-1. Font files exist in `fonts/` directory
-2. Font name matches exactly in settings
-3. FFmpeg can access the fonts directory
+**Causes**:
+- Font file missing or corrupted
+- Wrong font name in ASS file
 
-### Video exceeds limits
+**Solutions**:
+1. Verify fonts exist in `fonts/` directory
+2. Check font names match exactly (case-sensitive)
+3. Use Vazirmatn font family (included)
 
-The system enforces:
-- Max 1GB file size
-- Max 30 minutes duration
-- Max 4K resolution
+### Persian text reversed/corrupted
 
-Reduce video size or split into smaller parts.
+The platform uses:
+- UTF-8 encoding throughout
+- libass for proper RTL rendering
+- Vazirmatn font designed for Persian
 
-## 📝 Usage Flow
+If issues occur:
+1. Ensure SRT file is UTF-8 encoded
+2. Check `Encoding: 1` in ASS file (Unicode)
+3. Verify font supports Persian characters
 
-1. User opens website
-2. Enters video URL and SRT URL
-3. Opens Subtitle Designer
-4. Customizes font, colors, position, etc.
-5. Sees real-time preview updates
-6. Clicks "شروع پردازش" (Start Processing)
-7. Job is created and sent to GitHub Actions
-8. Browser can be closed - processing continues
-9. When complete, video is uploaded to Telegram
-10. User receives link in configured channel
+## 📝 API Reference
 
-## 🌐 Supported Languages
+### Backend API Endpoints
 
-- Persian (فارسی) ✓
-- Arabic (العربية) ✓
-- English ✓
-- Mixed text ✓
-- RTL/LTR bidirectional ✓
+#### `POST /api/job/create`
+
+Create a new processing job.
+
+**Request:**
+```json
+{
+  "video_url": "https://example.com/video.mp4",
+  "srt_url": "https://example.com/sub.srt",
+  "title": "Episode 1",
+  "subtitle_config": { ... }
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "job_id": "JOB-20240101-A1B2",
+  "message": "Workflow triggered successfully",
+  "status": "QUEUED"
+}
+```
+
+#### `GET /api/job/:jobId`
+
+Get job status.
+
+**Response:**
+```json
+{
+  "job_id": "JOB-20240101-A1B2",
+  "status": "PROCESSING",
+  "current_stage": "Hardsubbing",
+  "progress": 45,
+  "created_at": "2024-01-01T12:00:00Z",
+  "started_at": "2024-01-01T12:01:00Z",
+  "completed_at": null,
+  "error": null
+}
+```
+
+#### `GET /api/jobs`
+
+List all jobs (for admin dashboard).
+
+#### `POST /api/job/:jobId/update`
+
+Update job status (requires `X-API-Key` header).
+
+Used by GitHub Actions to report progress.
 
 ## 📄 License
 
-This project is provided as-is for educational and personal use.
+This project is provided as-is for educational and practical use.
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please ensure:
-- All changes maintain RTL/Persian support
-- No secrets are committed
-- Tests pass before submitting PR
+Contributions welcome! Please ensure:
+- All code is functional (no TODOs or mocks)
+- Persian translations are accurate
+- Security best practices followed
+- No secrets committed to Git
+
+## 📞 Support
+
+For issues or questions:
+1. Check troubleshooting section above
+2. Review GitHub Actions logs for errors
+3. Verify all secrets are configured correctly
+4. Test with small video files first
 
 ---
 
-**Made with ❤️ for the Persian-speaking community**
+**Built with ❤️ for the Persian-speaking community**

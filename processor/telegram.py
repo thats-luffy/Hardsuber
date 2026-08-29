@@ -1,110 +1,203 @@
+#!/usr/bin/env python3
 """
-Telegram upload utilities.
-Uploads processed videos to Telegram using Bot API.
+Telegram upload utilities for Hardsub Platform
+Uploads processed videos to Telegram using Bot API
 """
 
 import os
-import asyncio
+import json
 from pathlib import Path
+from datetime import datetime
 
 
-def upload_to_telegram(bot_token: str, chat_id: str, video_path: Path, caption: str = "") -> tuple[bool, str]:
+def format_caption(title, job_id, subtitle_config, video_info):
     """
-    Upload video to Telegram channel/group.
-    
-    Args:
-        bot_token: Telegram bot token
-        chat_id: Target chat ID
-        video_path: Path to video file
-        caption: Optional caption text
-        
-    Returns:
-        Tuple of (success: bool, message_link: str)
+    Format Telegram message caption.
     """
-    try:
-        # Use synchronous wrapper for async function
-        return asyncio.run(_upload_async(bot_token, chat_id, video_path, caption))
-    except Exception as e:
-        print(f"Telegram upload error: {e}")
-        return False, ""
-
-
-async def _upload_async(bot_token: str, chat_id: str, video_path: Path, caption: str) -> tuple[bool, str]:
-    """Async implementation of Telegram upload."""
+    font_name = subtitle_config.get('fontFamily', 'Vazirmatn')
+    width = video_info.get('width', 0)
+    height = video_info.get('height', 0)
+    duration = video_info.get('duration', 0)
     
-    try:
-        # Import aiohttp for HTTP requests
-        import aiohttp
-        
-        api_url = f"https://api.telegram.org/bot{bot_token}"
-        
-        # First, send the video
-        file_size = video_path.stat().st_size
-        print(f"Uploading video to Telegram: {file_size / (1024*1024):.2f}MB")
-        
-        # Check file size limit (Telegram allows up to 2GB for bots)
-        if file_size > 2 * 1024 * 1024 * 1024:
-            print("Error: Video file exceeds Telegram's 2GB limit")
-            return False, ""
-            
-        async with aiohttp.ClientSession() as session:
-            # Prepare form data
-            form = aiohttp.FormData()
-            form.add_field('chat_id', chat_id)
-            form.add_field('caption', caption, quote=False)
-            form.add_field('parse_mode', 'Markdown', quote=False)
-            
-            with open(video_path, 'rb') as f:
-                form.add_field('video', f, filename=video_path.name, content_type='video/mp4')
-                
-                async with session.post(f"{api_url}/sendVideo", data=form) as response:
-                    result = await response.json()
-                    
-                    if result.get('ok'):
-                        message_id = result['result']['message_id']
-                        # Construct message link
-                        # For channels: https://t.me/channel_name/message_id
-                        # For groups: depends on chat type
-                        message_link = f"https://t.me/c/{chat_id.lstrip('-')}/{message_id}" if chat_id.startswith('-') else f"https://t.me/{chat_id}/{message_id}"
-                        print(f"Telegram upload successful! Message ID: {message_id}")
-                        return True, message_link
-                    else:
-                        print(f"Telegram API error: {result}")
-                        return False, ""
-                        
-    except ImportError:
-        # Fallback to requests if aiohttp not available
-        return _upload_sync(bot_token, chat_id, video_path, caption)
-    except Exception as e:
-        print(f"Telegram upload failed: {e}")
-        return False, ""
+    # Format duration as HH:MM:SS
+    hours = int(duration // 3600)
+    minutes = int((duration % 3600) // 60)
+    seconds = int(duration % 60)
+    duration_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
+    caption = (
+        f"🎬 {title}\n\n"
+        f"🆔 Job: {job_id}\n\n"
+        f"✅ هاردساب تکمیل شد\n"
+        f"🔤 فونت: {font_name}\n"
+        f"📐 رزولوشن: {width}x{height}\n"
+        f"⏱ مدت: {duration_str}"
+    )
+    
+    # Ensure caption is within Telegram's 1024 character limit
+    return caption[:1024]
 
 
-def _upload_sync(bot_token: str, chat_id: str, video_path: Path, caption: str) -> tuple[bool, str]:
-    """Synchronous fallback using requests library."""
-    try:
-        import requests
-        
-        api_url = f"https://api.telegram.org/bot{bot_token}/sendVideo"
-        files = {'video': open(video_path, 'rb')}
-        data = {
-            'chat_id': chat_id,
-            'caption': caption,
-            'parse_mode': 'Markdown'
+def upload_to_telegram(video_path, title, job_id, subtitle_config, video_info):
+    """
+    Upload video to Telegram using Bot API.
+    Returns dict with success status and message info.
+    """
+    token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+    
+    if not token or not chat_id:
+        return {
+            'success': False,
+            'error': 'Telegram credentials not configured'
         }
+    
+    video_path = Path(video_path)
+    
+    if not video_path.exists():
+        return {
+            'success': False,
+            'error': 'Video file not found'
+        }
+    
+    # Check file size (Telegram limit: 50MB for regular bots, 2GB for premium)
+    file_size = video_path.stat().st_size
+    max_size = 52428800  # 50MB
+    
+    if file_size > max_size:
+        return {
+            'success': False,
+            'error': f'File too large for Telegram: {file_size / (1024*1024):.1f}MB (max 50MB)'
+        }
+    
+    caption = format_caption(title, job_id, subtitle_config, video_info)
+    
+    try:
+        import urllib.request
+        import urllib.parse
         
-        response = requests.post(api_url, files=files, data=data, timeout=3600)
-        result = response.json()
+        # Use sendVideo endpoint
+        url = f"https://api.telegram.org/bot{token}/sendVideo"
         
-        if result.get('ok'):
-            message_id = result['result']['message_id']
-            message_link = f"https://t.me/c/{chat_id.lstrip('-')}/{message_id}" if chat_id.startswith('-') else f"https://t.me/{chat_id}/{message_id}"
-            print(f"Telegram upload successful! Message ID: {message_id}")
-            return True, message_link
-        else:
-            print(f"Telegram API error: {result}")
-            return False, ""
+        # Prepare multipart form data
+        boundary = '----WebKitFormBoundary7MA4YWxkTrZu0gW'
+        
+        # Read video file
+        with open(video_path, 'rb') as f:
+            video_data = f.read()
+        
+        # Build multipart body
+        body_parts = []
+        
+        # Add chat_id
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="chat_id"\r\n')
+        body_parts.append(chat_id.encode())
+        
+        # Add caption
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="caption"\r\n')
+        body_parts.append(caption.encode('utf-8'))
+        
+        # Add parse_mode for formatting
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(b'Content-Disposition: form-data; name="parse_mode"\r\n')
+        body_parts.append(b'HTML')
+        
+        # Add video file
+        body_parts.append(f'--{boundary}'.encode())
+        body_parts.append(
+            f'Content-Disposition: form-data; name="video"; filename="{video_path.name}"'.encode()
+        )
+        body_parts.append(b'Content-Type: video/mp4\r\n')
+        body_parts.append(video_data)
+        
+        # Final boundary
+        body_parts.append(f'--{boundary}--'.encode())
+        
+        # Join with CRLF
+        body = b'\r\n'.join(body_parts)
+        
+        # Make request
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                'Content-Type': f'multipart/form-data; boundary={boundary}',
+                'Content-Length': str(len(body))
+            },
+            method='POST'
+        )
+        
+        with urllib.request.urlopen(req, timeout=600) as response:
+            result = json.loads(response.read().decode('utf-8'))
             
+            if result.get('ok'):
+                message_id = result.get('result', {}).get('message_id')
+                
+                # Construct message link
+                chat_id_str = str(chat_id)
+                if chat_id_str.startswith('-100'):
+                    # Supergroup/channel
+                    message_link = f"https://t.me/c/{chat_id_str[4:]}/{message_id}"
+                elif chat_id_str.startswith('-'):
+                    # Private group
+                    message_link = None  # Can't construct direct link for private groups
+                else:
+                    # Public username or channel
+                    message_link = None
+                
+                return {
+                    'success': True,
+                    'message_id': message_id,
+                    'message_link': message_link,
+                    'response': result
+                }
+            else:
+                error_desc = result.get('description', 'Unknown error')
+                return {
+                    'success': False,
+                    'error': f'Telegram API error: {error_desc}'
+                }
+    
     except Exception as e:
-        print(f"Telegram upload failed: {e}")
-        return False, ""
+        return {
+            'success': False,
+            'error': f'Upload failed: {str(e)}'
+        }
+
+
+def send_message(text, parse_mode='HTML'):
+    """
+    Send a text message to Telegram (for testing/debugging).
+    """
+    token = os.environ.get('TELEGRAM_BOT_TOKEN', '')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+    
+    if not token or not chat_id:
+        return {'success': False, 'error': 'Telegram credentials not configured'}
+    
+    try:
+        import urllib.request
+        import json
+        
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        data = json.dumps({
+            'chat_id': chat_id,
+            'text': text,
+            'parse_mode': parse_mode
+        }).encode('utf-8')
+        
+        req = urllib.request.Request(
+            url,
+            data=data,
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode('utf-8'))
+            return result if result.get('ok') else {'success': False, 'error': result}
+    
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
