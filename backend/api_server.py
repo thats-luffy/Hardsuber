@@ -3,6 +3,11 @@
 Secure Backend API for Hardsub Platform
 Handles job submission, status tracking, and GitHub Actions triggering
 NEVER exposes secrets to the frontend
+
+Architecture:
+- Frontend (GitHub Pages) -> Backend API (Python host) -> GitHub Actions -> Telegram
+- Backend stores only job metadata, never processes videos
+- GitHub Actions callbacks use PUBLIC_API_URL + API_KEY authentication
 """
 
 import os
@@ -17,21 +22,31 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import subprocess
 import re
+import fcntl
 
-# Configuration
+# Configuration from environment variables
 BACKEND_PORT = int(os.environ.get("BACKEND_PORT", "8080"))
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 GITHUB_PAT = os.environ.get("GITHUB_PAT", "")  # Only used server-side
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip('/')
 JOB_STATUS_DIR = Path(os.environ.get("JOB_STATUS_DIR", "/tmp/hardsub_jobs"))
-API_KEY = os.environ.get("API_KEY", secrets.token_hex(32))
+API_KEY = os.environ.get("API_KEY", "")
+
+# Validate required configuration in production
+if not API_KEY:
+    API_KEY = secrets.token_hex(32)
+    print(f"WARNING: API_KEY not set, generated temporary key: {API_KEY[:8]}...")
 
 # Ensure job status directory exists
 JOB_STATUS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Valid video URL patterns
+# Valid URL patterns
 VALID_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.wmv'}
 VALID_SRT_EXTENSIONS = {'.srt', '.ass', '.ssa', '.vtt'}
+
+# CORS configuration
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*").split(',')
 
 
 def generate_job_id():
@@ -120,6 +135,10 @@ def trigger_github_workflow(job_data):
         save_job_status(job_data)
         return True, "Development mode enabled"
     
+    # Validate PUBLIC_API_URL is set for production
+    if not PUBLIC_API_URL:
+        print("WARNING: PUBLIC_API_URL not set, callbacks from GitHub Actions will fail")
+    
     workflow_file = "video-processing.yml"
     url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/actions/workflows/{workflow_file}/dispatches"
     
@@ -129,6 +148,9 @@ def trigger_github_workflow(job_data):
         "Content-Type": "application/json"
     }
     
+    # Build callback URL using PUBLIC_API_URL (not localhost!)
+    callback_url = f"{PUBLIC_API_URL}/api/job/{job_data['job_id']}/update" if PUBLIC_API_URL else ""
+    
     payload = {
         "ref": "main",
         "inputs": {
@@ -137,7 +159,7 @@ def trigger_github_workflow(job_data):
             "srt_url": job_data["srt_url"],
             "title": job_data["title"],
             "subtitle_config": json.dumps(job_data["subtitle_config"]),
-            "api_callback_url": f"http://localhost:{BACKEND_PORT}/api/job/{job_data['job_id']}/update",
+            "api_callback_url": callback_url,
             "api_key": API_KEY
         }
     }
@@ -153,6 +175,7 @@ def trigger_github_workflow(job_data):
         with urllib.request.urlopen(req, timeout=30) as response:
             if response.status == 204:
                 job_data["status"] = "QUEUED"
+                job_data["github_run_id"] = None  # Will be updated by first callback
                 save_job_status(job_data)
                 return True, "Workflow triggered successfully"
             else:
@@ -370,10 +393,22 @@ class HardsubAPIHandler(BaseHTTPRequestHandler):
     
     def serve_static_file(self, filename):
         """Serve static file from the static directory"""
-        filepath = Path(__file__).parent / 'static' / filename
+        # Prevent path traversal attacks
+        safe_filename = os.path.basename(filename)
+        if safe_filename != filename:
+            self.send_json_response({"error": "Invalid file path"}, 400)
+            return
+        
+        # Try static directory first (relative to backend directory)
+        filepath = Path(__file__).parent.parent / 'static' / safe_filename
+        
         if not filepath.exists():
-            # Try root directory
-            filepath = Path(__file__).parent / filename
+            # Try current directory
+            filepath = Path(__file__).parent / 'static' / safe_filename
+        
+        if not filepath.exists():
+            # Try root relative
+            filepath = Path('/workspace/static') / safe_filename
         
         if not filepath.exists():
             self.send_json_response({"error": "File not found"}, 404)
@@ -381,18 +416,36 @@ class HardsubAPIHandler(BaseHTTPRequestHandler):
         
         # Determine content type
         content_type = 'text/html'
-        if filename.endswith('.css'):
+        if safe_filename.endswith('.css'):
             content_type = 'text/css'
-        elif filename.endswith('.js'):
+        elif safe_filename.endswith('.js'):
             content_type = 'application/javascript'
+        elif safe_filename.endswith('.json'):
+            content_type = 'application/json'
+        elif safe_filename.endswith('.png'):
+            content_type = 'image/png'
+        elif safe_filename.endswith('.jpg') or safe_filename.endswith('.jpeg'):
+            content_type = 'image/jpeg'
+        elif safe_filename.endswith('.svg'):
+            content_type = 'image/svg+xml'
+        elif safe_filename.endswith('.ttf') or safe_filename.endswith('.otf'):
+            content_type = 'font/opentype'
         
         self.send_response(200)
         self.send_header('Content-Type', content_type)
-        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_cors_headers()
         self.end_headers()
         
         with open(filepath, 'rb') as f:
             self.wfile.write(f.read())
+    
+    def send_cors_headers(self):
+        """Send CORS headers based on configuration"""
+        origin = self.headers.get('Origin', '*')
+        if '*' in ALLOWED_ORIGINS or origin in ALLOWED_ORIGINS:
+            self.send_header('Access-Control-Allow-Origin', origin if origin != '*' else '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type, X-API-Key')
 
 
 def main():

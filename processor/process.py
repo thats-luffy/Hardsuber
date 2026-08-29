@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Video Processing Pipeline for Hardsub Platform
-Downloads video, validates, hardsubs subtitles, uploads to Telegram
+Receives already-downloaded files from GitHub Actions workflow
+Performs hardsubbing and Telegram upload
 """
 
 import os
@@ -12,6 +13,7 @@ import tempfile
 import shutil
 from pathlib import Path
 from datetime import datetime
+import threading
 
 # Import local modules
 from validation import validate_video, validate_srt, check_disk_space
@@ -19,25 +21,31 @@ from ffmpeg_utils import build_ffmpeg_command, get_video_info, parse_ffmpeg_prog
 from subtitle import convert_srt_to_ass, generate_ass_style
 from telegram import upload_to_telegram
 
-# Configuration from environment
+# Configuration from environment - passed from GitHub Actions workflow
 JOB_ID = os.environ.get("JOB_ID", "unknown")
-VIDEO_URL = os.environ.get("VIDEO_URL", "")
-SRT_URL = os.environ.get("SRT_URL", "")
 TITLE = os.environ.get("TITLE", "Untitled")
 SUBTITLE_CONFIG_JSON = os.environ.get("SUBTITLE_CONFIG", "{}")
 API_CALLBACK_URL = os.environ.get("API_CALLBACK_URL", "")
 API_KEY = os.environ.get("API_KEY", "")
 
+# File paths - already downloaded by workflow
+WORK_DIR = Path(os.environ.get("WORK_DIR", ""))
+VIDEO_FILE = Path(os.environ.get("VIDEO_FILE", ""))
+SRT_FILE = Path(os.environ.get("SRT_FILE", ""))
+
+# Video metadata - already validated by workflow
+VIDEO_DURATION = float(os.environ.get("VIDEO_DURATION", "0"))
+VIDEO_WIDTH = int(os.environ.get("VIDEO_WIDTH", "0"))
+VIDEO_HEIGHT = int(os.environ.get("VIDEO_HEIGHT", "0"))
+VIDEO_SIZE = int(os.environ.get("VIDEO_SIZE", "0"))
+
 # Limits
-MAX_VIDEO_SIZE_BYTES = int(os.environ.get("MAX_VIDEO_SIZE_BYTES", "1073741824"))  # 1GB
-MAX_DURATION_SECONDS = int(os.environ.get("MAX_DURATION_SECONDS", "1800"))  # 30 minutes
 MAX_RESOLUTION = int(os.environ.get("MAX_RESOLUTION", "3840"))  # 4K
 MIN_DISK_SPACE_BYTES = int(os.environ.get("MIN_DISK_SPACE_BYTES", "5368709120"))  # 5GB free space required
 
 # Paths
-WORK_DIR = Path(tempfile.mkdtemp(prefix=f"hardsub_{JOB_ID}_"))
 FONTS_DIR = Path(__file__).parent.parent / "fonts"
-OUTPUT_FILE = WORK_DIR / "output.mp4"
+OUTPUT_FILE = WORK_DIR / "output.mp4" if WORK_DIR else Path(tempfile.mktemp(suffix=".mp4"))
 
 # Subtitle config
 try:
@@ -52,7 +60,7 @@ def log(message):
     print(f"[{timestamp}] {message}", flush=True)
 
 
-def update_status(status, stage=None, progress=None, error=None):
+def update_status(status, stage=None, progress=None, error=None, **extra_data):
     """Update job status via API callback"""
     if not API_CALLBACK_URL or not API_KEY:
         log(f"Status update skipped (no callback): {status}")
@@ -62,9 +70,14 @@ def update_status(status, stage=None, progress=None, error=None):
     if stage:
         data["current_stage"] = stage
     if progress is not None:
-        data["progress"] = progress
+        data["progress"] = min(100, max(0, int(progress)))
     if error:
         data["error"] = error[:500]  # Limit error message length
+    
+    # Add any extra data (telegram info, etc.)
+    for key, value in extra_data.items():
+        if value is not None:
+            data[key] = value
     
     try:
         import urllib.request
@@ -78,73 +91,9 @@ def update_status(status, stage=None, progress=None, error=None):
             method='POST'
         )
         with urllib.request.urlopen(req, timeout=10) as response:
-            log(f"Status updated: {status}")
+            log(f"Status updated: {status} (progress: {progress}%)")
     except Exception as e:
         log(f"Failed to update status: {e}")
-
-
-def download_file(url, destination, max_size=None):
-    """Download file with size limit"""
-    import urllib.request
-    
-    log(f"Downloading: {url}")
-    
-    try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'HardsubBot/1.0'})
-        
-        with urllib.request.urlopen(req, timeout=300) as response:
-            # Check Content-Length if available
-            content_length = response.headers.get('Content-Length')
-            if content_length and max_size:
-                content_length = int(content_length)
-                if content_length > max_size:
-                    raise ValueError(f"File too large: {content_length} bytes (max: {max_size})")
-            
-            # Download with size tracking
-            downloaded = 0
-            chunk_size = 8192
-            
-            with open(destination, 'wb') as f:
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    
-                    downloaded += len(chunk)
-                    if max_size and downloaded > max_size:
-                        raise ValueError(f"Download exceeded size limit: {downloaded} bytes")
-                    
-                    f.write(chunk)
-                    
-                    # Progress reporting
-                    if content_length:
-                        progress = min(100, int((downloaded / content_length) * 100))
-                        log(f"Download progress: {progress}%")
-            
-            log(f"Download complete: {destination} ({downloaded} bytes)")
-            return downloaded
-            
-    except Exception as e:
-        log(f"Download failed: {e}")
-        raise
-
-
-def run_ffprobe(video_path):
-    """Run ffprobe to get video information"""
-    cmd = [
-        'ffprobe',
-        '-v', 'quiet',
-        '-print_format', 'json',
-        '-show_format',
-        '-show_streams',
-        str(video_path)
-    ]
-    
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(f"FFprobe failed: {result.stderr}")
-    
-    return json.loads(result.stdout)
 
 
 def prepare_fonts():
@@ -161,131 +110,139 @@ def prepare_fonts():
         return False
     
     log(f"Found {len(font_files)} font files")
+    for f in font_files:
+        log(f"  - {f.name}")
     return True
 
 
 def cleanup():
     """Clean up temporary files"""
-    log(f"Cleaning up temporary directory: {WORK_DIR}")
-    try:
-        shutil.rmtree(WORK_DIR, ignore_errors=True)
-    except Exception as e:
-        log(f"Cleanup warning: {e}")
+    if WORK_DIR and WORK_DIR.exists():
+        log(f"Cleaning up temporary directory: {WORK_DIR}")
+        try:
+            shutil.rmtree(WORK_DIR, ignore_errors=True)
+        except Exception as e:
+            log(f"Cleanup warning: {e}")
 
 
 def main():
     """Main processing pipeline"""
     log(f"=== Starting Job: {JOB_ID} ===")
     log(f"Title: {TITLE}")
-    log(f"Video URL: {VIDEO_URL}")
-    log(f"SRT URL: {SRT_URL}")
-    
-    video_path = None
-    srt_path = None
+    log(f"Video file: {VIDEO_FILE}")
+    log(f"Subtitle file: {SRT_FILE}")
+    log(f"Video duration: {VIDEO_DURATION}s, Resolution: {VIDEO_WIDTH}x{VIDEO_HEIGHT}")
     
     try:
         # Step 1: Check system resources
-        update_status("PROCESSING", "Checking system resources")
+        update_status("PROCESSING", "Checking system resources", 5)
         if not check_disk_space(MIN_DISK_SPACE_BYTES):
             raise RuntimeError("Insufficient disk space")
         
-        # Log system info
-        subprocess.run(['df', '-h'], check=False)
-        subprocess.run(['free', '-h'], check=False)
-        subprocess.run(['nproc'], check=False)
-        
         # Step 2: Prepare fonts
-        update_status("PROCESSING", "Preparing fonts")
-        prepare_fonts()
+        update_status("PROCESSING", "Preparing fonts", 15)
+        if not prepare_fonts():
+            log("Warning: Font preparation failed, continuing with system fonts")
         
-        # Step 3: Download video
-        update_status("DOWNLOADING", "Downloading video", 0)
-        video_path = WORK_DIR / "input.mp4"
-        download_file(VIDEO_URL, video_path, max_size=MAX_VIDEO_SIZE_BYTES)
-        update_status("DOWNLOADING", "Video downloaded", 100)
+        # Step 3: Validate video file exists (already downloaded by workflow)
+        update_status("PROCESSING", "Validating video file", 20)
+        if not VIDEO_FILE.exists():
+            raise RuntimeError(f"Video file not found: {VIDEO_FILE}")
         
-        # Step 4: Validate video with ffprobe
-        update_status("PROCESSING", "Validating video")
-        probe_data = run_ffprobe(video_path)
-        video_info = get_video_info(probe_data)
+        video_size = VIDEO_FILE.stat().st_size
+        log(f"Video file size: {video_size} bytes")
         
-        log(f"Video info: {video_info}")
+        # Step 4: Validate SRT file exists (already downloaded by workflow)
+        update_status("PROCESSING", "Validating subtitle file", 25)
+        if not SRT_FILE.exists():
+            raise RuntimeError(f"Subtitle file not found: {SRT_FILE}")
         
-        # Check duration
-        if video_info['duration'] > MAX_DURATION_SECONDS:
-            raise ValueError(f"Video too long: {video_info['duration']}s (max: {MAX_DURATION_SECONDS}s)")
-        
-        # Check resolution
-        if video_info['width'] > MAX_RESOLUTION or video_info['height'] > MAX_RESOLUTION:
-            raise ValueError(f"Video resolution too high: {video_info['width']}x{video_info['height']} (max: {MAX_RESOLUTION})")
-        
-        # Step 5: Download SRT
-        update_status("DOWNLOADING", "Downloading subtitle")
-        srt_path = WORK_DIR / "subtitle.srt"
-        download_file(SRT_URL, srt_path, max_size=10 * 1024 * 1024)  # 10MB limit for SRT
-        
-        # Step 6: Validate SRT
-        update_status("PROCESSING", "Validating subtitle")
-        if not validate_srt(srt_path):
+        if not validate_srt(SRT_FILE):
             raise ValueError("Invalid SRT file")
         
-        # Step 7: Convert SRT to ASS with styling
-        update_status("PROCESSING", "Generating subtitle styles")
-        ass_path = WORK_DIR / "subtitle.ass"
-        ass_content = convert_srt_to_ass(srt_path, SUBTITLE_CONFIG, FONTS_DIR)
+        # Step 5: Convert SRT to ASS with styling
+        update_status("PROCESSING", "Generating subtitle styles", 30)
+        ass_path = WORK_DIR / "subtitle.ass" if WORK_DIR else Path(tempfile.mktemp(suffix=".ass"))
+        ass_content = convert_srt_to_ass(SRT_FILE, SUBTITLE_CONFIG, FONTS_DIR)
         
         with open(ass_path, 'w', encoding='utf-8') as f:
             f.write(ass_content)
         
         log(f"ASS file created: {ass_path}")
         
-        # Step 8: Run FFmpeg hardsub
-        update_status("PROCESSING", "Hardsubbing video", 0)
+        # Step 6: Run FFmpeg hardsub with progress tracking
+        update_status("HARDSUBBING", "Starting FFmpeg", 30)
         
         ffmpeg_cmd = build_ffmpeg_command(
-            video_path=video_path,
+            video_path=VIDEO_FILE,
             ass_path=ass_path,
             output_path=OUTPUT_FILE,
             fonts_dir=FONTS_DIR
         )
         
-        log(f"Running FFmpeg: {' '.join(ffmpeg_cmd)}")
+        log(f"Running FFmpeg command")
         
-        # Run FFmpeg with progress parsing
+        # Run FFmpeg with progress output using -progress pipe:1
+        progress_cmd = ffmpeg_cmd.copy()
+        progress_cmd.insert(1, '-nostats')
+        progress_cmd.insert(1, '-progress', 'pipe:1')
+        
         process = subprocess.Popen(
-            ffmpeg_cmd,
+            progress_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            stdin=subprocess.PIPE
+            stdin=subprocess.PIPE,
+            bufsize=1
         )
         
-        total_duration = video_info['duration']
+        total_duration = VIDEO_DURATION
+        current_progress_seconds = 0
         
-        # Read stderr for progress
-        ffmpeg_progress = ""
-        while True:
-            line = process.stderr.readline()
-            if not line:
-                break
-            
-            line_str = line.decode('utf-8', errors='ignore')
-            ffmpeg_progress += line_str
-            
-            # Parse progress
-            progress_data = parse_ffmpeg_progress(line_str, total_duration)
-            if progress_data and total_duration > 0:
-                current_time = progress_data.get('time_seconds', 0)
-                progress_pct = min(95, int((current_time / total_duration) * 100))
-                update_status("PROCESSING", "Hardsubbing", progress_pct)
+        # Read stdout for progress (machine-readable format)
+        def read_progress():
+            nonlocal current_progress_seconds
+            while True:
+                line = process.stdout.readline()
+                if not line:
+                    break
+                try:
+                    line_str = line.decode('utf-8', errors='ignore').strip()
+                    if line_str.startswith('out_time_ms='):
+                        time_ms = int(line_str.split('=')[1])
+                        current_progress_seconds = time_ms / 1_000_000
+                        if total_duration > 0:
+                            progress_pct = 30 + (current_progress_seconds / total_duration * 65)  # 30-95%
+                            update_status("HARDSUBBING", f"Hardsubbing: {current_progress_seconds:.1f}s/{total_duration:.1f}s", progress_pct)
+                except Exception:
+                    pass
         
+        # Read stderr for errors
+        stderr_output = []
+        def read_stderr():
+            while True:
+                line = process.stderr.readline()
+                if not line:
+                    break
+                stderr_output.append(line.decode('utf-8', errors='ignore'))
+        
+        # Start threads for reading output
+        stdout_thread = threading.Thread(target=read_progress)
+        stderr_thread = threading.Thread(target=read_stderr)
+        
+        stdout_thread.start()
+        stderr_thread.start()
+        
+        # Wait for process to complete
         process.wait()
+        stdout_thread.join()
+        stderr_thread.join()
         
         if process.returncode != 0:
-            stderr_output = process.stderr.read().decode('utf-8', errors='ignore')
-            raise RuntimeError(f"FFmpeg failed: {stderr_output[:500]}")
+            error_msg = ''.join(stderr_output)[-500:]
+            raise RuntimeError(f"FFmpeg failed with code {process.returncode}: {error_msg}")
         
         log(f"FFmpeg completed successfully")
-        update_status("PROCESSING", "Hardsubbing complete", 100)
+        update_status("PROCESSING", "Hardsubbing complete", 95)
         
         # Verify output exists
         if not OUTPUT_FILE.exists():
@@ -294,8 +251,14 @@ def main():
         output_size = OUTPUT_FILE.stat().st_size
         log(f"Output file size: {output_size} bytes")
         
-        # Step 9: Upload to Telegram
-        update_status("UPLOADING", "Uploading to Telegram", 0)
+        # Step 7: Upload to Telegram
+        update_status("UPLOADING", "Uploading to Telegram", 95)
+        
+        video_info = {
+            'width': VIDEO_WIDTH,
+            'height': VIDEO_HEIGHT,
+            'duration': VIDEO_DURATION
+        }
         
         telegram_result = upload_to_telegram(
             video_path=OUTPUT_FILE,
@@ -311,32 +274,12 @@ def main():
                 "COMPLETED",
                 "Upload complete",
                 100,
-                error=None
+                error=None,
+                telegram_message_id=telegram_result.get('message_id'),
+                telegram_message_link=telegram_result.get('message_link')
             )
-            
-            # Update with Telegram info (if callback supports it)
-            if API_CALLBACK_URL and API_KEY:
-                try:
-                    import urllib.request
-                    data = {
-                        "telegram_message_id": telegram_result.get('message_id'),
-                        "telegram_message_link": telegram_result.get('message_link')
-                    }
-                    req = urllib.request.Request(
-                        API_CALLBACK_URL,
-                        data=json.dumps(data).encode('utf-8'),
-                        headers={
-                            'Content-Type': 'application/json',
-                            'X-API-Key': API_KEY
-                        },
-                        method='POST'
-                    )
-                    urllib.request.urlopen(req, timeout=10)
-                except Exception as e:
-                    log(f"Failed to update Telegram info: {e}")
         else:
             log(f"Telegram upload failed: {telegram_result.get('error', 'Unknown error')}")
-            # Still mark as completed since hardsub succeeded
             update_status(
                 "COMPLETED",
                 "Hardsub complete (Telegram upload failed)",

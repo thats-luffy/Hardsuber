@@ -57,7 +57,7 @@ jobs:
       - name: Install FFmpeg and dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg libass-dev fonts-liberation
+          sudo apt-get install -y ffmpeg libass-dev fonts-libulation jq bc
       
       - name: Install Python dependencies
         run: |
@@ -75,6 +75,20 @@ jobs:
           echo "WORK_DIR=$WORK_DIR" >> $GITHUB_ENV
           echo "Created working directory: $WORK_DIR"
       
+      - name: Update status - Starting
+        if: always()
+        env:
+          API_CALLBACK_URL: ${{ inputs.api_callback_url }}
+          API_KEY: ${{ inputs.api_key }}
+          JOB_ID: ${{ inputs.job_id }}
+        run: |
+          if [ -n "$API_CALLBACK_URL" ] && [ -n "$API_KEY" ]; then
+            curl -s -X POST "$API_CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -H "X-API-Key: $API_KEY" \
+              -d '{"status": "DOWNLOADING", "current_stage": "Starting download", "progress": 5}'
+          fi
+      
       - name: Download video with size limit
         env:
           VIDEO_URL: ${{ inputs.video_url }}
@@ -83,8 +97,8 @@ jobs:
           echo "Downloading video..."
           VIDEO_FILE="$WORK_DIR/input.mp4"
           
-          # Use curl with size limit check
-          curl -L --max-filesize $MAX_SIZE \
+          # Use curl with size limit check and fail on HTTP errors
+          curl -L --fail --max-filesize $MAX_SIZE \
             -H "User-Agent: HardsubBot/1.0" \
             -o "$VIDEO_FILE" \
             "$VIDEO_URL"
@@ -97,6 +111,7 @@ jobs:
           VIDEO_SIZE=$(stat -c%s "$VIDEO_FILE" 2>/dev/null || stat -f%z "$VIDEO_FILE")
           echo "Video downloaded: $VIDEO_SIZE bytes"
           echo "VIDEO_FILE=$VIDEO_FILE" >> $GITHUB_ENV
+          echo "VIDEO_SIZE=$VIDEO_SIZE" >> $GITHUB_ENV
       
       - name: Validate video with ffprobe
         run: |
@@ -143,17 +158,21 @@ jobs:
             curl -s -X POST "$API_CALLBACK_URL" \
               -H "Content-Type: application/json" \
               -H "X-API-Key: $API_KEY" \
-              -d '{"status": "DOWNLOADING", "current_stage": "Downloading subtitle"}'
+              -d '{"status": "DOWNLOADING", "current_stage": "Downloading subtitle", "progress": 15}'
           fi
       
       - name: Download subtitle
         env:
           SRT_URL: ${{ inputs.srt_url }}
+          MAX_SRT_SIZE: 10485760  # 10MB
         run: |
           echo "Downloading subtitle..."
           SRT_FILE="$WORK_DIR/subtitle.srt"
           
-          curl -L -H "User-Agent: HardsubBot/1.0" -o "$SRT_FILE" "$SRT_URL"
+          curl -L --fail --max-filesize $MAX_SRT_SIZE \
+            -H "User-Agent: HardsubBot/1.0" \
+            -o "$SRT_FILE" \
+            "$SRT_URL"
           
           if [ ! -s "$SRT_FILE" ]; then
             echo "Error: Failed to download subtitle or file is empty"
@@ -191,8 +210,6 @@ jobs:
       - name: Run video processing
         env:
           JOB_ID: ${{ inputs.job_id }}
-          VIDEO_URL: ${{ inputs.video_url }}
-          SRT_URL: ${{ inputs.srt_url }}
           TITLE: ${{ inputs.title }}
           SUBTITLE_CONFIG: ${{ inputs.subtitle_config }}
           API_CALLBACK_URL: ${{ inputs.api_callback_url }}
@@ -205,6 +222,7 @@ jobs:
           VIDEO_DURATION: ${{ env.VIDEO_DURATION }}
           VIDEO_WIDTH: ${{ env.VIDEO_WIDTH }}
           VIDEO_HEIGHT: ${{ env.VIDEO_HEIGHT }}
+          VIDEO_SIZE: ${{ env.VIDEO_SIZE }}
         run: |
           echo "Starting video processing..."
           cd processor
