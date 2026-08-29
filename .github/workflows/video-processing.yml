@@ -1,0 +1,104 @@
+name: Video Processing Workflow
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: 'Job ID'
+        required: true
+      video_url:
+        description: 'Video URL'
+        required: true
+      srt_url:
+        description: 'Subtitle (SRT) URL'
+        required: true
+      title:
+        description: 'Video Title'
+        required: true
+      settings:
+        description: 'Subtitle Settings (JSON)'
+        required: true
+        default: '{}'
+
+jobs:
+  process-video:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Check system resources
+        run: |
+          echo "=== System Information ==="
+          echo "Disk Space:"
+          df -h /
+          echo ""
+          echo "Memory:"
+          free -h
+          echo ""
+          echo "CPU Cores:"
+          nproc
+          echo ""
+          echo "FFmpeg Version:"
+          ffmpeg -version | head -n 1
+          echo ""
+          echo "Python Version:"
+          python3 --version
+          
+      - name: Check available disk space
+        run: |
+          AVAILABLE_GB=$(df -BG / | awk 'NR==2 {print $4}' | sed 's/G//')
+          REQUIRED_GB=5
+          if [ "$AVAILABLE_GB" -lt "$REQUIRED_GB" ]; then
+            echo "::error::Insufficient disk space. Available: ${AVAILABLE_GB}GB, Required: ${REQUIRED_GB}GB"
+            exit 1
+          fi
+          echo "✓ Sufficient disk space available: ${AVAILABLE_GB}GB"
+          
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests aiohttp
+          
+      - name: Verify FFmpeg installation
+        run: |
+          which ffmpeg
+          ffmpeg -codecs | grep -E "(h264|aac)" || true
+          
+      - name: Create job configuration
+        run: |
+          cat > /tmp/job_config.json << EOF
+          {
+            "job_id": "${{ github.event.inputs.job_id }}",
+            "video_url": "${{ github.event.inputs.video_url }}",
+            "srt_url": "${{ github.event.inputs.srt_url }}",
+            "title": "${{ github.event.inputs.title }}",
+            "settings": ${{ github.event.inputs.settings }}
+          }
+          EOF
+          cat /tmp/job_config.json
+          
+      - name: Run video processor
+        id: processor
+        run: |
+          cd processor
+          python process.py /tmp/job_config.json
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_VIDEO_SIZE_MB: 1024
+          MAX_DURATION_MINUTES: 30
+          MAX_SRT_SIZE_MB: 10
+          
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "Cleaning up temporary files..."
+          rm -rf /tmp/hardsub_* /tmp/job_config.json || true
+          echo "Cleanup completed."
