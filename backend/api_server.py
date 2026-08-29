@@ -29,7 +29,8 @@ BACKEND_PORT = int(os.environ.get("BACKEND_PORT", "8080"))
 GITHUB_OWNER = os.environ.get("GITHUB_OWNER", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPO", "")
 GITHUB_PAT = os.environ.get("GITHUB_PAT", "")  # Only used server-side
-PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "").rstrip('/')
+# Default to mrluffys.shop - NEVER use localhost or api.mrluffys.shop in production
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", "https://mrluffys.shop").rstrip('/')
 JOB_STATUS_DIR = Path(os.environ.get("JOB_STATUS_DIR", "/tmp/hardsub_jobs"))
 API_KEY = os.environ.get("API_KEY", "")
 

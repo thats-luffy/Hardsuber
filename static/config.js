@@ -4,8 +4,9 @@
 
 // API Configuration
 const API_CONFIG = {
-    // Backend API URL (change this for production)
-    baseUrl: window.location.origin,
+    // Backend API URL - MUST match PUBLIC_API_URL environment variable on backend
+    // For production at mrluffys.shop, this should be https://mrluffys.shop
+    baseUrl: 'https://mrluffys.shop',
     
     // Job polling interval in milliseconds
     pollInterval: 3000,

@@ -12,7 +12,7 @@ User Browser → Python API (mrluffys.shop) → GitHub Actions → Telegram
 **Key Points:**
 - Python API server ONLY manages jobs, NEVER processes videos
 - GitHub Actions performs ALL video downloading, processing, and uploading
-- Callbacks use PUBLIC_API_URL (NOT localhost)
+- Callbacks use PUBLIC_API_URL (https://mrluffys.shop - NOT localhost or api.mrluffys.shop)
 
 ---
 
@@ -22,7 +22,7 @@ User Browser → Python API (mrluffys.shop) → GitHub Actions → Telegram
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `PUBLIC_API_URL` | **CRITICAL**: Public HTTPS URL of your API | `https://api.mrluffys.shop` |
+| `PUBLIC_API_URL` | **CRITICAL**: Public HTTPS URL of your API (NOT localhost, NOT api.*) | `https://mrluffys.shop` |
 | `API_KEY` | Secret key for GitHub Actions callbacks | Random 64-char hex string |
 | `GITHUB_OWNER` | Your GitHub username | `yourusername` |
 | `GITHUB_REPO` | Repository name | `hardsub-platform` |
@@ -63,13 +63,13 @@ cd /path/to/hardsub-platform
 
 # Create .env file
 cat > .env << ENVEOF
-PUBLIC_API_URL=https://api.mrluffys.shop
+PUBLIC_API_URL=https://mrluffys.shop
 API_KEY=$(openssl rand -hex 32)
 GITHUB_OWNER=yourusername
 GITHUB_REPO=hardsub-platform
 GITHUB_PAT=ghp_your_token_here
 BACKEND_PORT=8080
-ALLOWED_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+ALLOWED_ORIGINS=https://mrluffys.shop,https://www.mrluffys.shop
 ENVEOF
 
 # Set proper permissions
@@ -90,7 +90,7 @@ curl http://localhost:8080/api/health
 ```nginx
 server {
     listen 443 ssl;
-    server_name api.mrluffys.shop;
+    server_name mrluffys.shop;
     
     ssl_certificate /path/to/cert.pem;
     ssl_certificate_key /path/to/key.pem;
@@ -128,7 +128,7 @@ Update `static/config.js` with your API URL:
 
 ```javascript
 const API_CONFIG = {
-    baseUrl: 'https://api.mrluffys.shop',  // Your public API URL
+    baseUrl: 'https://mrluffys.shop',  // Your public API URL (NOT api.mrluffys.shop)
     pollInterval: 3000,
     maxRetries: 3
 };
@@ -140,12 +140,12 @@ Deploy frontend to GitHub Pages, Netlify, Vercel, or any static hosting.
 
 1. **Health Check:**
 ```bash
-curl https://api.mrluffys.shop/api/health
+curl https://mrluffys.shop/api/health
 ```
 
 2. **Create a Test Job:**
 ```bash
-curl -X POST https://api.mrluffys.shop/api/job/create \
+curl -X POST https://mrluffys.shop/api/job/create \
   -H "Content-Type: application/json" \
   -d '{
     "video_url": "https://example.com/test.mp4",
@@ -157,7 +157,15 @@ curl -X POST https://api.mrluffys.shop/api/job/create \
 
 3. **Check Job Status:**
 ```bash
-curl https://api.mrluffys.shop/api/job/JOB-XXXXXX/status
+curl https://mrluffys.shop/api/job/JOB-XXXXXX/status
+```
+
+4. **Test Callback Manually:**
+```bash
+curl -X POST https://mrluffys.shop/api/job/TEST-123/update \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: your_api_key" \
+  -d '{"status": "TEST"}'
 ```
 
 ---
@@ -168,12 +176,14 @@ curl https://api.mrluffys.shop/api/job/JOB-XXXXXX/status
 
 If GitHub Actions can't reach your API:
 
-1. Verify `PUBLIC_API_URL` is set correctly (HTTPS, no trailing slash)
+1. Verify `PUBLIC_API_URL` is set correctly (HTTPS, no trailing slash, NOT localhost, NOT api.*)
+   - Correct: `https://mrluffys.shop`
+   - Wrong: `http://localhost:8080`, `https://api.mrluffys.shop`
 2. Ensure your firewall allows incoming connections on port 443
 3. Check nginx/reverse proxy logs for errors
 4. Test callback manually:
 ```bash
-curl -X POST https://api.mrluffys.shop/api/job/TEST-123/update \
+curl -X POST https://mrluffys.shop/api/job/TEST-123/update \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your_api_key" \
   -d '{"status": "TEST"}'

@@ -307,7 +307,11 @@ export BACKEND_PORT=8080
 python3 api_server.py
 ```
 
-Access at: `http://localhost:8080`
+Access at: `http://localhost:8080` (local development only - NOT for production)
+
+**For production deployment, always use:**
+- `PUBLIC_API_URL=https://mrluffys.shop`
+- NEVER use `localhost` or `api.mrluffys.shop` in production
 
 ### Test Without GitHub Actions
 
